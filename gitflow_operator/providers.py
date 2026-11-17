@@ -19,7 +19,7 @@ from .core import MergeRequest, OperatorError, Remote, redact
 
 
 class Provider:
-    def create_merge_request(self, branch: str, title: str, body: str) -> MergeRequest:
+    def create_merge_request(self, branch: str, title: str, body: str, target: str = "develop") -> MergeRequest:
         raise NotImplementedError
 
     def find_merge_request(self, branch: str, target: str) -> MergeRequest:
@@ -84,16 +84,16 @@ class GitHubProvider(Provider):
         self.repo = repo
         self.owner, self.name = remote.project.split("/")
 
-    def create_merge_request(self, branch: str, title: str, body: str) -> MergeRequest:
+    def create_merge_request(self, branch: str, title: str, body: str, target: str = "develop") -> MergeRequest:
         output = _gh(
-            ["pr", "create", "--base", "develop", "--head", branch, "--title", title, "--body", body],
+            ["pr", "create", "--base", target, "--head", branch, "--title", title, "--body", body],
             self.repo,
         )
         url = next((line.strip() for line in output.splitlines() if line.strip().startswith("https://")), "")
         if not url:
             raise OperatorError("GitHub CLI did not return a merge-request URL")
         # Fetch the created request using the same unambiguous source/target rules.
-        return self.find_merge_request(branch, "develop")
+        return self.find_merge_request(branch, target)
 
     def find_merge_request(self, branch: str, target: str) -> MergeRequest:
         rows = _gh_json(
@@ -292,11 +292,11 @@ class GitLabProvider(Provider):
         self.token = token
         self.base_url = f"https://{remote.host}/api/v4"
 
-    def create_merge_request(self, branch: str, title: str, body: str) -> MergeRequest:
+    def create_merge_request(self, branch: str, title: str, body: str, target: str = "develop") -> MergeRequest:
         row = self._request(
             "POST",
             f"/projects/{self.project_id}/merge_requests",
-            {"source_branch": branch, "target_branch": "develop", "title": title, "description": body},
+            {"source_branch": branch, "target_branch": target, "title": title, "description": body},
         )
         if not isinstance(row, dict):
             raise OperatorError("GitLab returned an invalid merge-request response")
