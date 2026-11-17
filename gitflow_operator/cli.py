@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .core import OperatorError, detect_remote, evidence, redact, remote_evidence
+from .core import OperatorError, detect_remote, evidence, redact, remote_evidence, resolve_base
 from . import operations
 
 
@@ -17,8 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status")
 
-    branch = sub.add_parser("branch-from-develop")
+    branch = sub.add_parser("branch", aliases=["branch-from-develop"], help="branch from the repository's integration/default branch")
     branch.add_argument("--branch", required=True)
+    branch.add_argument("--base", help="explicit base branch; otherwise detect repository conventions")
 
     commit = sub.add_parser("commit")
     commit.add_argument("--message", required=True)
@@ -28,16 +29,19 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--title", required=True)
     create.add_argument("--body", default="")
     create.add_argument("--dry-run", action="store_true")
+    create.add_argument("--target")
 
     watch = sub.add_parser("watch-ci")
     watch.add_argument("--dry-run", action="store_true")
+    watch.add_argument("--target")
 
     notes = sub.add_parser("prepare-release-notes")
     notes.add_argument("--summary", required=True)
     notes.add_argument("--tests")
 
-    merge = sub.add_parser("squash-merge-to-develop")
+    merge = sub.add_parser("squash-merge", aliases=["squash-merge-to-develop"])
     merge.add_argument("--dry-run", action="store_true")
+    merge.add_argument("--target")
     return parser
 
 
@@ -53,18 +57,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "status":
             result = operations.status(repo, args.item_id)
-        elif args.command == "branch-from-develop":
-            result = operations.branch_from_develop(repo, args.item_id, args.branch)
+        elif args.command in {"branch", "branch-from-develop"}:
+            result = operations.branch_from_develop(repo, args.item_id, args.branch, args.base)
         elif args.command == "commit":
             result = operations.commit(repo, args.item_id, args.message, args.paths)
         elif args.command == "create-merge-request":
-            result = operations.create_merge_request(repo, args.item_id, args.title, args.body, args.dry_run)
+            result = operations.create_merge_request(repo, args.item_id, args.title, args.body, args.dry_run, target=args.target)
         elif args.command == "watch-ci":
-            result = operations.watch_ci(repo, args.item_id, args.dry_run)
+            result = operations.watch_ci(repo, args.item_id, args.dry_run, target=args.target)
         elif args.command == "prepare-release-notes":
             result = operations.release_notes(repo, args.item_id, args.summary, args.tests)
         else:
-            result = operations.squash_merge(repo, args.item_id, args.dry_run)
+            result = operations.squash_merge(repo, args.item_id, args.dry_run, target=args.target)
+        result["operation"] = args.command
         if result.get("status") in {"blocked", "failed", "pending", "incomplete"}:
             return _emit(result) or 1
         return _emit(result)
@@ -73,9 +78,14 @@ def main(argv: list[str] | None = None) -> int:
         extra: dict[str, Any] = dict(exc.details)
         try:
             remote = detect_remote(repo)
-            extra.update(remote_evidence(remote, "develop", current_commit_for_error(repo)))
+            extra.update(remote_evidence(remote, source_sha=current_commit_for_error(repo)))
         except OperatorError:
             pass
+        if args.command in {"create-merge-request", "watch-ci", "squash-merge", "squash-merge-to-develop"}:
+            try:
+                extra["target"] = resolve_base(repo, args.target)
+            except OperatorError:
+                pass
         try:
             result = evidence(
                 repo,

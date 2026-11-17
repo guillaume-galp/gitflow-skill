@@ -104,6 +104,19 @@ def test_successful_gitlab_create_and_gated_squash_merge():
     assert json.loads(merge_request.data)["merge_when_pipeline_succeeds"] is False
 
 
+@pytest.mark.parametrize("target", ["development", "master", "trunk"])
+def test_gitlab_creation_sends_requested_target(target):
+    transport = GitLabTransport()
+    transport.responses[("POST", "/api/v4/projects/group%2Fsub%2Frepo/merge_requests")] = {
+        "iid": 12, "web_url": "https://scm1.example/mr/12",
+        "source_branch": "topic", "target_branch": target,
+        "sha": "abc123", "state": "opened", "draft": False,
+    }
+    created = provider(transport).create_merge_request("topic", "Fix", "Body", target=target)
+    assert json.loads(transport.calls[0][0].data)["target_branch"] == target
+    assert created.target_branch == target
+
+
 def test_gitlab_pipeline_must_match_current_source_head():
     transport = GitLabTransport()
     api = provider(transport)

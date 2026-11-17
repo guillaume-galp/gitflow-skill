@@ -175,9 +175,71 @@ def redact(value: Any, environ: dict[str, str] | None = None) -> Any:
     return value
 
 
-def require_feature_branch(branch: str) -> None:
-    if not branch.startswith(("feature/", "fix/")):
-        raise OperatorError("merge requests must originate from a feature/ or fix/ branch")
+def validate_branch(repo: Path, branch: str) -> str:
+    if not branch or branch.startswith("-") or branch == "HEAD":
+        raise OperatorError(f"invalid branch name: {branch!r}")
+    git(repo, "check-ref-format", f"refs/heads/{branch}")
+    return branch
+
+
+def _optional_git(repo: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            text=True, capture_output=True, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise OperatorError("git executable is not installed") from exc
+    if result.returncode == 1:
+        return None
+    if result.returncode:
+        raise OperatorError(f"git {args[0]} failed with exit status {result.returncode}")
+    return result.stdout.strip()
+
+
+def resolve_base(repo: Path, explicit: str | None = None) -> str:
+    """Resolve repository conventions offline; never create or rename a base."""
+    if explicit is not None:
+        return validate_branch(repo, explicit)
+    for key in ("gitflow.operator.base", "gitflow.branch.develop"):
+        candidate = _optional_git(repo, "config", "--get", key)
+        if candidate is not None:
+            return validate_branch(repo, candidate)
+    rows = git(
+        repo, "for-each-ref", "--format=%(refname) %(symref)",
+        "refs/heads/", "refs/remotes/origin/",
+    ).splitlines()
+    branches: set[str] = set()
+    default_ref = _optional_git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    default = default_ref.removeprefix("refs/remotes/origin/") if default_ref else None
+    for row in rows:
+        parts = row.split()
+        ref = parts[0]
+        if ref != "refs/remotes/origin/HEAD" and len(parts) == 1:
+            branches.add(ref.removeprefix("refs/heads/").removeprefix("refs/remotes/origin/"))
+    candidates = sorted(branches & {"develop", "development"})
+    if len(candidates) > 1:
+        raise OperatorError("ambiguous integration branches: develop, development; specify --base/--target or gitflow.operator.base")
+    if candidates:
+        return candidates[0]
+    primary = _optional_git(repo, "config", "--get", "gitflow.branch.master")
+    if primary is not None:
+        return validate_branch(repo, primary)
+    if default is not None:
+        if default not in branches:
+            raise OperatorError("origin/HEAD points to a missing cached branch; fetch it or specify --base/--target")
+        return validate_branch(repo, default)
+    candidates = sorted(branches & {"main", "master"})
+    if len(candidates) == 1:
+        return candidates[0]
+    raise OperatorError("cannot determine an unambiguous base branch; specify --base/--target or gitflow.operator.base")
+
+
+def require_source_branch(branch: str, target: str) -> None:
+    if branch == "HEAD":
+        raise OperatorError("detached HEAD: switch to a work branch first")
+    if branch == target:
+        raise OperatorError(f"source and target are both {target}; switch to a work branch first")
 
 
 def remote_evidence(remote: Remote, target: str | None = None, source_sha: str | None = None) -> dict[str, str]:

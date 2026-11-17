@@ -12,8 +12,11 @@ from .core import (
     detect_remote,
     dirty_files,
     evidence,
+    git,
     remote_evidence,
-    require_feature_branch,
+    require_source_branch,
+    resolve_base,
+    validate_branch,
 )
 from .providers import Provider, create_provider
 
@@ -21,10 +24,10 @@ from .providers import Provider, create_provider
 def _find_and_validate(
     repo: Path,
     provider: Provider,
-    target: str = "develop",
+    target: str,
 ) -> MergeRequest:
     branch = current_branch(repo)
-    require_feature_branch(branch)
+    require_source_branch(branch, target)
     mr = provider.find_merge_request(branch, target)
     mr_evidence = {"merge_request": {"id": mr.number, "url": mr.url}}
     if mr.source_branch != branch or mr.target_branch != target:
@@ -47,28 +50,42 @@ def status(repo: Path, item_id: str | None) -> dict[str, Any]:
     return evidence(repo, item_id, operation="status")
 
 
-def branch_from_develop(repo: Path, item_id: str | None, branch: str) -> dict[str, Any]:
-    if not _branch_exists(repo, "develop"):
-        return evidence(repo, item_id, operation="branch-from-develop", status="blocked", reason="develop branch missing")
+def branch_from_develop(
+    repo: Path, item_id: str | None, branch: str, base: str | None = None,
+) -> dict[str, Any]:
+    target = resolve_base(repo, base)
+    validate_branch(repo, branch)
+    if dirty_files(repo):
+        raise OperatorError("working tree has changes; commit or explicitly preserve them before switching branches")
     if _branch_exists(repo, branch):
         return evidence(repo, item_id, operation="branch-from-develop", status="blocked", reason=f"branch already exists: {branch}")
-    from .core import git
+    if _branch_exists(repo, target):
+        base_ref = f"refs/heads/{target}"
+    elif _branch_exists(repo, target, remote=True):
+        base_ref = f"refs/remotes/origin/{target}"
+    else:
+        raise OperatorError(f"base branch {target!r} is not available locally; fetch it or specify an existing --base")
+    git(repo, "checkout", "--no-track", "-b", branch, base_ref)
+    return evidence(
+        repo, item_id, operation="branch-from-develop", status="created",
+        target_branch=branch, base_branch=target, base_ref=base_ref,
+        base_revision=current_commit(repo), freshness="local-cache; no fetch performed",
+    )
 
-    git(repo, "checkout", "develop")
-    git(repo, "checkout", "-b", branch)
-    return evidence(repo, item_id, operation="branch-from-develop", status="created", target_branch=branch)
 
-
-def _branch_exists(repo: Path, branch: str) -> bool:
+def _branch_exists(repo: Path, branch: str, remote: bool = False) -> bool:
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            ["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+             f"refs/remotes/origin/{branch}" if remote else f"refs/heads/{branch}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
     except FileNotFoundError as exc:
         raise OperatorError("git executable is not installed") from exc
+    if result.returncode not in {0, 1}:
+        raise OperatorError(f"cannot inspect branch: {branch}")
     return result.returncode == 0
 
 
@@ -102,17 +119,19 @@ def create_merge_request(
     body: str,
     dry_run: bool,
     environ: dict[str, str] | None = None,
+    target: str | None = None,
 ) -> dict[str, Any]:
     remote = detect_remote(repo, environ)
+    target = resolve_base(repo, target)
     branch = current_branch(repo)
     source_sha = current_commit(repo)
-    require_feature_branch(branch)
-    base = remote_evidence(remote, "develop", source_sha)
+    require_source_branch(branch, target)
+    base = remote_evidence(remote, target, source_sha)
     if dry_run:
         return evidence(repo, item_id, operation="create-merge-request", status="dry-run", outcome="dry-run", **base, title=title, body=body)
     provider = create_provider(remote, str(repo), environ)
-    mr = provider.create_merge_request(branch, title, body)
-    if mr.source_branch != branch or mr.target_branch != "develop":
+    mr = provider.create_merge_request(branch, title, body, target=target)
+    if mr.source_branch != branch or mr.target_branch != target:
         raise OperatorError(
             "created merge request source or target did not match the requested Gitflow branches",
             details={"merge_request": {"id": mr.number, "url": mr.url}},
@@ -139,16 +158,18 @@ def watch_ci(
     item_id: str | None,
     dry_run: bool,
     environ: dict[str, str] | None = None,
+    target: str | None = None,
 ) -> dict[str, Any]:
     remote = detect_remote(repo, environ)
+    target = resolve_base(repo, target)
     branch = current_branch(repo)
     source_sha = current_commit(repo)
-    require_feature_branch(branch)
-    base = remote_evidence(remote, "develop", source_sha)
+    require_source_branch(branch, target)
+    base = remote_evidence(remote, target, source_sha)
     if dry_run:
         return evidence(repo, item_id, operation="watch-ci", status="dry-run", outcome="dry-run", **base)
     provider = create_provider(remote, str(repo), environ)
-    mr = _find_and_validate(repo, provider)
+    mr = _find_and_validate(repo, provider, target)
     try:
         provider.wait_for_pipeline(mr)
         pipeline, checks = provider.pipeline_status(mr)
@@ -216,16 +237,18 @@ def squash_merge(
     item_id: str | None,
     dry_run: bool,
     environ: dict[str, str] | None = None,
+    target: str | None = None,
 ) -> dict[str, Any]:
     remote = detect_remote(repo, environ)
+    target = resolve_base(repo, target)
     branch = current_branch(repo)
     source_sha = current_commit(repo)
-    require_feature_branch(branch)
-    base = remote_evidence(remote, "develop", source_sha)
+    require_source_branch(branch, target)
+    base = remote_evidence(remote, target, source_sha)
     if dry_run:
         return evidence(repo, item_id, operation="squash-merge-to-develop", status="dry-run", outcome="dry-run", **base)
     provider = create_provider(remote, str(repo), environ)
-    mr = _find_and_validate(repo, provider)
+    mr = _find_and_validate(repo, provider, target)
     gates = _verify_merge_gates(provider, mr)
     try:
         provider.squash_merge(mr)
