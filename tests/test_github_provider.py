@@ -7,7 +7,8 @@ from gitflow_operator.core import OperatorError, Remote
 from gitflow_operator.providers import GitHubProvider
 
 
-def test_github_merge_request_creation_preserves_gh_cli_contract(monkeypatch):
+@pytest.mark.parametrize("target", ["develop", "development", "master", "trunk"])
+def test_github_merge_request_creation_preserves_gh_cli_contract(monkeypatch, target):
     calls = []
 
     def fake_gh(args, cwd):
@@ -18,7 +19,7 @@ def test_github_merge_request_creation_preserves_gh_cli_contract(monkeypatch):
             "number": 42,
             "url": "https://github.com/org/repo/pull/42",
             "title": "Feature",
-            "baseRefName": "develop",
+            "baseRefName": target,
             "headRefName": "feature/task",
             "headRefOid": "abc123",
             "isDraft": False,
@@ -28,11 +29,11 @@ def test_github_merge_request_creation_preserves_gh_cli_contract(monkeypatch):
     monkeypatch.setattr("gitflow_operator.providers._gh", fake_gh)
     provider = GitHubProvider(Remote("github", "github.com", "org/repo"), "/tmp/repo")
 
-    mr = provider.create_merge_request("feature/task", "Feature", "Body")
+    mr = provider.create_merge_request("feature/task", "Feature", "Body", target=target)
 
     assert mr.number == "42"
     assert mr.source_sha == "abc123"
-    assert calls[0][:5] == ["pr", "create", "--base", "develop", "--head"]
+    assert calls[0][:5] == ["pr", "create", "--base", target, "--head"]
     assert calls[0][-2:] == ["--body", "Body"]
 
 
